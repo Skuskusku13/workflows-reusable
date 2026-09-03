@@ -1,0 +1,125 @@
+name: OWASP ZAP Baseline Scan
+
+# Workflow réutilisable de scan DAST (dynamique, sur l'app en cours d'exécution)
+# via OWASP ZAP en mode "baseline" UNIQUEMENT (scan passif, non intrusif).
+# Aucun scan actif (attaques réelles) n'est effectué par ce workflow — c'est
+# un choix assumé, cohérent avec un usage en CI sur des runners partagés.
+#
+# Complète `npm-security.yml` (SAST / dépendances) avec une couche DAST :
+# l'app est buildée et démarrée localement dans le runner, puis ZAP scanne
+# `http://localhost:<port>` en mode passif.
+#
+# Utilisation depuis un autre repo (ex: portfolio) :
+#
+#   jobs:
+#     zap-baseline:
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.1.0
+#       with:
+#         project-name: portfolio
+#         node-version: '22'
+#         build-command: npm run build
+#         start-command: npm run preview -- --port 4173 --host
+#         port: '4173'
+#
+# L'appelant doit fournir une `start-command` qui démarre un serveur HTTP
+# écoutant sur `port` (ex: un serveur de preview statique type `vite preview`).
+# Le rapport ZAP (HTML/JSON/MD) est publié comme artifact GitHub Actions,
+# pas juste affiché dans les logs.
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: "Nom du projet appelant (affichage + nom de l'artifact du rapport)"
+        default: 'project'
+        required: false
+        type: string
+      working-directory:
+        description: "Chemin vers la racine du projet (package.json)"
+        default: '.'
+        required: false
+        type: string
+      node-version:
+        description: "Version de Node.js à utiliser (obligatoire, pas de valeur par défaut)"
+        required: true
+        type: string
+      build-command:
+        description: "Commande de build de l'app avant démarrage (ex: 'npm run build'). Vide = pas de build."
+        default: ''
+        required: false
+        type: string
+      start-command:
+        description: "Commande qui démarre l'app en écoute sur `port` (ex: 'npm run preview -- --port 4173 --host')"
+        required: true
+        type: string
+      port:
+        description: "Port localhost sur lequel l'app écoute une fois démarrée"
+        required: true
+        type: string
+      health-check-path:
+        description: "Chemin ajouté à http://localhost:<port> pour vérifier que l'app répond avant de lancer ZAP"
+        default: '/'
+        required: false
+        type: string
+      zap-fail-on-warn:
+        description: "Si true, le job échoue aussi sur les alertes ZAP de niveau WARN (pas seulement FAIL)"
+        default: false
+        required: false
+        type: boolean
+
+jobs:
+  zap-baseline:
+    name: "OWASP ZAP baseline scan (${{ inputs.project-name }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Start app in background
+        run: |
+          nohup ${{ inputs.start-command }} > app-server.log 2>&1 &
+          echo $! > app-server.pid
+          disown
+
+      - name: Wait for app readiness
+        run: |
+          URL="http://localhost:${{ inputs.port }}${{ inputs.health-check-path }}"
+          for i in $(seq 1 20); do
+            if curl -sf "$URL" > /dev/null; then
+              echo "App prête après $i tentative(s) : $URL"
+              exit 0
+            fi
+            echo "En attente de l'app ($i/20) : $URL"
+            sleep 3
+          done
+          echo "L'app n'a pas répondu à temps (60s). Logs du serveur :"
+          cat app-server.log || true
+          exit 1
+
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874 # v0.15.0
+        with:
+          target: "http://localhost:${{ inputs.port }}"
+          fail_action: true
+          cmd_options: ${{ inputs.zap-fail-on-warn && '' || '-I' }}
+          allow_issue_writing: false
+          artifact_name: "${{ inputs.project-name }}-zap-baseline-report"

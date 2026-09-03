@@ -1,0 +1,130 @@
+name: NPM Security Scan
+
+# Workflow réutilisable de scan sécurité pour un projet npm/Node.
+#
+# Utilisation depuis un autre repo (ex: portfolio) :
+#
+#   jobs:
+#     security:
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/npm-security.yml@v1.1.0
+#       with:
+#         project-name: portfolio
+#         node-version: '22'
+#         audit-level: high
+#
+# Couvre : npm audit (dépendances), Trivy (scan filesystem/dépendances),
+# Gitleaks (détection de secrets commités). Chaque outil est activable/
+# désactivable indépendamment via les inputs `enable-*`.
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: "Nom du projet appelant (affichage uniquement, sans impact fonctionnel)"
+        default: 'project'
+        required: false
+        type: string
+      working-directory:
+        description: "Chemin vers la racine du projet npm (package.json / package-lock.json)"
+        default: '.'
+        required: false
+        type: string
+      node-version:
+        description: "Version de Node.js à utiliser (obligatoire, pas de valeur par défaut)"
+        required: true
+        type: string
+      audit-level:
+        description: "Seuil de sévérité pour npm audit (low|moderate|high|critical)"
+        default: 'high'
+        required: false
+        type: string
+      enable-npm-audit:
+        description: "Active l'audit des dépendances npm"
+        default: true
+        required: false
+        type: boolean
+      enable-trivy:
+        description: "Active le scan Trivy (filesystem/dépendances)"
+        default: true
+        required: false
+        type: boolean
+      trivy-severity:
+        description: "Sévérités Trivy déclenchant un échec (liste séparée par des virgules)"
+        default: 'CRITICAL,HIGH'
+        required: false
+        type: string
+      enable-gitleaks:
+        description: "Active la détection de secrets commités (Gitleaks)"
+        default: true
+        required: false
+        type: boolean
+
+jobs:
+  security:
+    name: "Security scan (${{ inputs.project-name }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Les 3 scanners tournent tous, même si l'un d'eux échoue
+      # (`continue-on-error: true`), pour remonter tous les problèmes en un
+      # seul run plutôt que de devoir relancer la CI à chaque échec corrigé.
+      # Le step "Vérifier les résultats des scanners" ci-dessous fait échouer
+      # le job au final si au moins un scanner est en échec.
+      - name: npm audit
+        id: npm-audit
+        if: ${{ inputs.enable-npm-audit }}
+        continue-on-error: true
+        run: npm audit --audit-level=${{ inputs.audit-level }}
+
+      - name: Trivy filesystem scan
+        id: trivy
+        if: ${{ inputs.enable-trivy }}
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: ${{ inputs.working-directory }}
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Gitleaks secret scan
+        id: gitleaks
+        if: ${{ inputs.enable-gitleaks }}
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Vérifier les résultats des scanners
+        if: always()
+        run: |
+          echo "=== Récapitulatif des scanners ==="
+          echo "npm audit : ${{ steps.npm-audit.outcome }}"
+          echo "Trivy     : ${{ steps.trivy.outcome }}"
+          echo "Gitleaks  : ${{ steps.gitleaks.outcome }}"
+          echo "=================================="
+          if [ "${{ steps.npm-audit.outcome }}" = "failure" ] || [ "${{ steps.trivy.outcome }}" = "failure" ] || [ "${{ steps.gitleaks.outcome }}" = "failure" ]; then
+            echo "❌ Au moins un scanner a échoué (voir le récapitulatif ci-dessus et les logs du step concerné)."
+            exit 1
+          fi
+          echo "✅ Tous les scanners exécutés sont OK (les scanners désactivés via enable-* apparaissent en 'skipped')."

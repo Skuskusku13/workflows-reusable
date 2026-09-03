@@ -17,7 +17,7 @@ Exemple d'appel depuis un autre repo :
 ```yaml
 jobs:
   security:
-    uses: Skuskusku13/workflows-reusable/.github/workflows/npm-security.yml@v1.0.0
+    uses: Skuskusku13/workflows-reusable/.github/workflows/npm-security.yml@v1.1.0
     with:
       project-name: portfolio
       node-version: '22'
@@ -35,7 +35,7 @@ Exemple d'appel depuis un autre repo :
 ```yaml
 jobs:
   zap-baseline:
-    uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.0.0
+    uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.1.0
     with:
       project-name: portfolio
       node-version: '22'

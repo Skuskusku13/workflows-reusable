@@ -13,7 +13,7 @@ name: OWASP ZAP Baseline Scan
 #
 #   jobs:
 #     zap-baseline:
-#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.0.0
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.1.0
 #       with:
 #         project-name: portfolio
 #         node-version: '22'

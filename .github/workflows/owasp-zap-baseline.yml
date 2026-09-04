@@ -1,30 +1,20 @@
 name: OWASP ZAP Baseline Scan
 
-# Workflow réutilisable de scan DAST (dynamique, sur l'app en cours d'exécution)
-# via OWASP ZAP en mode "baseline" UNIQUEMENT (scan passif, non intrusif).
-# Aucun scan actif (attaques réelles) n'est effectué par ce workflow — c'est
-# un choix assumé, cohérent avec un usage en CI sur des runners partagés.
+# Workflow réutilisable de scan DAST via OWASP ZAP en mode "baseline" UNIQUEMENT
+# (scan passif, non intrusif). Aucun scan actif n'est effectué.
 #
-# Complète `npm-security.yml` (SAST / dépendances) avec une couche DAST :
-# l'app est buildée et démarrée localement dans le runner, puis ZAP scanne
-# `http://localhost:<port>` en mode passif.
-#
-# Utilisation depuis un autre repo (ex: portfolio) :
+# L'app est buildée et démarrée dans le runner, puis ZAP scanne
+# http://localhost:<port>. Le rapport (HTML/JSON/MD) est publié en artifact.
 #
 #   jobs:
 #     zap-baseline:
-#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.1.0
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.2.0
 #       with:
 #         project-name: portfolio
 #         node-version: '22'
 #         build-command: npm run build
 #         start-command: npm run preview -- --port 4173 --host
 #         port: '4173'
-#
-# L'appelant doit fournir une `start-command` qui démarre un serveur HTTP
-# écoutant sur `port` (ex: un serveur de preview statique type `vite preview`).
-# Le rapport ZAP (HTML/JSON/MD) est publié comme artifact GitHub Actions,
-# pas juste affiché dans les logs.
 
 on:
   workflow_call:
@@ -40,29 +30,34 @@ on:
         required: false
         type: string
       node-version:
-        description: "Version de Node.js à utiliser (obligatoire, pas de valeur par défaut)"
+        description: "Version de Node.js à utiliser"
         required: true
         type: string
       build-command:
-        description: "Commande de build de l'app avant démarrage (ex: 'npm run build'). Vide = pas de build."
+        description: "Commande de build avant démarrage (vide = pas de build)"
         default: ''
         required: false
         type: string
       start-command:
-        description: "Commande qui démarre l'app en écoute sur `port` (ex: 'npm run preview -- --port 4173 --host')"
+        description: "Commande qui démarre l'app en écoute sur `port` (doit écouter sur 0.0.0.0, ex: --host)"
         required: true
         type: string
       port:
-        description: "Port localhost sur lequel l'app écoute une fois démarrée"
+        description: "Port localhost sur lequel l'app écoute"
         required: true
         type: string
       health-check-path:
-        description: "Chemin ajouté à http://localhost:<port> pour vérifier que l'app répond avant de lancer ZAP"
+        description: "Chemin testé sur http://localhost:<port> avant de lancer ZAP"
         default: '/'
         required: false
         type: string
+      zap-spider-minutes:
+        description: "Durée max du spider ZAP en minutes"
+        default: '1'
+        required: false
+        type: string
       zap-fail-on-warn:
-        description: "Si true, le job échoue aussi sur les alertes ZAP de niveau WARN (pas seulement FAIL)"
+        description: "Si true, le job échoue aussi sur les alertes WARN (pas seulement FAIL)"
         default: false
         required: false
         type: boolean
@@ -71,6 +66,7 @@ jobs:
   zap-baseline:
     name: "OWASP ZAP baseline scan (${{ inputs.project-name }})"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     defaults:
@@ -88,7 +84,7 @@ jobs:
           cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
       - name: Install dependencies
-        run: npm ci --no-audit
+        run: npm ci --no-audit --no-fund
 
       - name: Build app
         if: ${{ inputs.build-command != '' }}
@@ -111,7 +107,7 @@ jobs:
             echo "En attente de l'app ($i/20) : $URL"
             sleep 3
           done
-          echo "L'app n'a pas répondu à temps (60s). Logs du serveur :"
+          echo "L'app n'a pas répondu en 60s. Logs du serveur :"
           cat app-server.log || true
           exit 1
 
@@ -120,6 +116,10 @@ jobs:
         with:
           target: "http://localhost:${{ inputs.port }}"
           fail_action: true
-          cmd_options: ${{ inputs.zap-fail-on-warn && '' || '-I' }}
+          cmd_options: "-m ${{ inputs.zap-spider-minutes }} ${{ inputs.zap-fail-on-warn && '' || '-I' }}"
           allow_issue_writing: false
           artifact_name: "${{ inputs.project-name }}-zap-baseline-report"
+
+      - name: Stop app
+        if: always()
+        run: kill "$(cat app-server.pid)" 2>/dev/null || true

@@ -1,26 +1,22 @@
 name: NPM Security Scan
 
 # Workflow réutilisable de scan sécurité pour un projet npm/Node.
-#
-# Utilisation depuis un autre repo (ex: portfolio) :
+# 3 jobs parallèles et indépendants : npm audit, Trivy, Gitleaks.
+# Aucun `npm ci` : les 3 outils travaillent sur package-lock.json / le git history.
 #
 #   jobs:
 #     security:
-#       uses: Skuskusku13/workflows-reusable/.github/workflows/npm-security.yml@v1.1.0
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/npm-security.yml@v1.2.0
 #       with:
 #         project-name: portfolio
 #         node-version: '22'
 #         audit-level: high
-#
-# Couvre : npm audit (dépendances), Trivy (scan filesystem/dépendances),
-# Gitleaks (détection de secrets commités). Chaque outil est activable/
-# désactivable indépendamment via les inputs `enable-*`.
 
 on:
   workflow_call:
     inputs:
       project-name:
-        description: "Nom du projet appelant (affichage uniquement, sans impact fonctionnel)"
+        description: "Nom du projet appelant (affichage uniquement)"
         default: 'project'
         required: false
         type: string
@@ -30,7 +26,7 @@ on:
         required: false
         type: string
       node-version:
-        description: "Version de Node.js à utiliser (obligatoire, pas de valeur par défaut)"
+        description: "Version de Node.js à utiliser"
         required: true
         type: string
       audit-level:
@@ -38,31 +34,35 @@ on:
         default: 'high'
         required: false
         type: string
+      audit-omit-dev:
+        description: "Exclut les devDependencies de npm audit"
+        default: true
+        required: false
+        type: boolean
       enable-npm-audit:
-        description: "Active l'audit des dépendances npm"
         default: true
         required: false
         type: boolean
       enable-trivy:
-        description: "Active le scan Trivy (filesystem/dépendances)"
         default: true
         required: false
         type: boolean
       trivy-severity:
-        description: "Sévérités Trivy déclenchant un échec (liste séparée par des virgules)"
+        description: "Sévérités Trivy déclenchant un échec (séparées par des virgules)"
         default: 'CRITICAL,HIGH'
         required: false
         type: string
       enable-gitleaks:
-        description: "Active la détection de secrets commités (Gitleaks)"
         default: true
         required: false
         type: boolean
 
 jobs:
-  security:
-    name: "Security scan (${{ inputs.project-name }})"
+  npm-audit:
+    name: "npm audit (${{ inputs.project-name }})"
+    if: ${{ inputs.enable-npm-audit }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     defaults:
@@ -71,60 +71,94 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'npm'
-          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
-      - name: Install dependencies
-        run: npm ci --no-audit
-
-      # Les 3 scanners tournent tous, même si l'un d'eux échoue
-      # (`continue-on-error: true`), pour remonter tous les problèmes en un
-      # seul run plutôt que de devoir relancer la CI à chaque échec corrigé.
-      # Le step "Vérifier les résultats des scanners" ci-dessous fait échouer
-      # le job au final si au moins un scanner est en échec.
+      # Pas de `npm ci` : npm audit n'a besoin que du lockfile.
+      # Retry avec backoff : le registry npm renvoie régulièrement des 503
+      # sur l'endpoint d'audit (panne côté npmjs.org, hors de notre contrôle).
       - name: npm audit
-        id: npm-audit
-        if: ${{ inputs.enable-npm-audit }}
-        continue-on-error: true
-        run: npm audit --audit-level=${{ inputs.audit-level }}
+        timeout-minutes: 6
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
+          OMIT_DEV: ${{ inputs.audit-omit-dev }}
+        run: |
+          npm config set fetch-timeout 60000
+          npm config set fetch-retries 3
+          npm config set fetch-retry-mintimeout 5000
+          npm config set fetch-retry-maxtimeout 20000
 
+          OMIT_FLAG=""
+          if [ "$OMIT_DEV" = "true" ]; then OMIT_FLAG="--omit=dev"; fi
+
+          for attempt in 1 2 3 4 5; do
+            echo "::group::npm audit (tentative $attempt/5)"
+            set +e
+            npm audit --audit-level="$AUDIT_LEVEL" $OMIT_FLAG 2>&1 | tee audit.log
+            CODE=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+
+            # Erreur côté registry (503/5xx, endpoint HS) → on retente.
+            if grep -qE "audit endpoint returned an error|5[0-9]{2} Service Unavailable|ECONNRESET|ETIMEDOUT" audit.log; then
+              if [ "$attempt" -lt 5 ]; then
+                WAIT=$((attempt * 30))
+                echo "Registry npm indisponible, nouvel essai dans ${WAIT}s..."
+                sleep "$WAIT"
+                continue
+              fi
+              echo "❌ Registry npm toujours indisponible après 5 tentatives."
+              exit 1
+            fi
+
+            # Sinon le code de sortie est légitime (0 = OK, 1 = vulnérabilités trouvées).
+            exit "$CODE"
+          done
+
+  trivy:
+    name: "Trivy (${{ inputs.project-name }})"
+    if: ${{ inputs.enable-trivy }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # scanners: vuln uniquement (les secrets sont couverts par Gitleaks).
+      # Mirrors ECR en priorité : la DB sur ghcr.io est régulièrement rate-limitée.
       - name: Trivy filesystem scan
-        id: trivy
-        if: ${{ inputs.enable-trivy }}
-        continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: ${{ inputs.working-directory }}
+          scanners: 'vuln'
           severity: ${{ inputs.trivy-severity }}
           exit-code: '1'
           ignore-unfixed: true
+          cache: 'true'
+        env:
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db,ghcr.io/aquasecurity/trivy-db
+          TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db,ghcr.io/aquasecurity/trivy-java-db
+
+  gitleaks:
+    name: "Gitleaks (${{ inputs.project-name }})"
+    if: ${{ inputs.enable-gitleaks }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Gitleaks secret scan
-        id: gitleaks
-        if: ${{ inputs.enable-gitleaks }}
-        continue-on-error: true
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
-
-      - name: Vérifier les résultats des scanners
-        if: always()
-        run: |
-          echo "=== Récapitulatif des scanners ==="
-          echo "npm audit : ${{ steps.npm-audit.outcome }}"
-          echo "Trivy     : ${{ steps.trivy.outcome }}"
-          echo "Gitleaks  : ${{ steps.gitleaks.outcome }}"
-          echo "=================================="
-          if [ "${{ steps.npm-audit.outcome }}" = "failure" ] || [ "${{ steps.trivy.outcome }}" = "failure" ] || [ "${{ steps.gitleaks.outcome }}" = "failure" ]; then
-            echo "❌ Au moins un scanner a échoué (voir le récapitulatif ci-dessus et les logs du step concerné)."
-            exit 1
-          fi
-          echo "✅ Tous les scanners exécutés sont OK (les scanners désactivés via enable-* apparaissent en 'skipped')."

@@ -20,6 +20,7 @@
 - Scan DAST actif via `zaproxy/action-full-scan` v0.13.0, mêmes inputs que le baseline, plus `zap-active-scan-minutes` (défaut 30, via `-z "-config scanner.maxScanDurationInMins=N"`). Spider par défaut à 5 min, `job-timeout-minutes` par défaut 90. Prévu pour un `schedule` hebdomadaire.
 
 ### Divers
+- Nouveau workflow interne `release.yml` : au push d'un tag `vX.Y.Z`, crée la Release GitHub avec les notes de la section correspondante de ce CHANGELOG (token Actions du repo, aucun secret à configurer).
 - Versions vérifiées le 2026-09-05, toutes les actions sont à leur dernière release : `actions/checkout` v7.0.1, `actions/setup-node` v7.0.0, `aquasecurity/trivy-action` v0.36.0, `gitleaks/gitleaks-action` v3.0.0, `zaproxy/action-baseline` v0.15.0, `zaproxy/action-full-scan` v0.13.0.
 
 ## v1.2.0 — 2026-09-04

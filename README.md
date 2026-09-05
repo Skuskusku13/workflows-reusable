@@ -118,3 +118,5 @@ jobs:
 ## Versions
 
 Voir [CHANGELOG.md](CHANGELOG.md). Les tags suivent semver : un patch ne casse jamais un caller existant.
+
+Publier une version : merger dans `main`, ajouter une section `## vX.Y.Z` au CHANGELOG, puis `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`. Le workflow interne `release.yml` crée la Release GitHub automatiquement avec les notes du CHANGELOG.

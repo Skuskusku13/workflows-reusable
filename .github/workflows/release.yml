@@ -1,0 +1,56 @@
+name: Release
+
+# Crée (ou met à jour) la Release GitHub quand un tag vX.Y.Z est poussé.
+# Les notes sont extraites de la section « ## vX.Y.Z » du CHANGELOG.md ;
+# à défaut, GitHub génère les notes depuis les commits.
+#
+# Utilise le token Actions du repo (permissions: contents: write), aucun
+# secret personnel à configurer.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: "Release ${{ github.ref_name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" '
+            /^## / { if (found) exit; if (index($0, "## " tag) == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if grep -q '[^[:space:]]' release-notes.md; then
+            echo "Notes extraites du CHANGELOG pour $GITHUB_REF_NAME :"
+            cat release-notes.md
+          else
+            echo "Aucune section '## $GITHUB_REF_NAME' dans CHANGELOG.md : notes générées par GitHub."
+            rm -f release-notes.md
+          fi
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -f release-notes.md ]; then
+            NOTES_ARGS=(--notes-file release-notes.md)
+          else
+            NOTES_ARGS=(--generate-notes)
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $TAG déjà existante : mise à jour des notes."
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" "${NOTES_ARGS[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag "${NOTES_ARGS[@]}"
+          fi
+          echo "URL : https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"

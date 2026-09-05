@@ -1,23 +1,32 @@
-name: OWASP ZAP Baseline Scan
+name: OWASP ZAP Full Scan
 
-# Workflow réutilisable de scan DAST via OWASP ZAP en mode "baseline" UNIQUEMENT :
-# spider + analyse passive des réponses, aucune attaque envoyée. Rapide, adapté
-# aux pull requests. Pour un scan actif complet, voir owasp-zap-full-scan.yml.
+# Workflow réutilisable de scan DAST COMPLET via OWASP ZAP : spider + analyse
+# passive + SCAN ACTIF. ZAP envoie de vraies attaques (injections SQL, XSS,
+# traversée de chemin, ...) sur chaque point d'entrée découvert.
 #
-# Agnostique du langage. Deux modes :
+# Conséquences :
+#   - Long (dizaines de minutes) et bruyant : à planifier (schedule), pas à lancer
+#     sur chaque pull request. Utiliser owasp-zap-baseline.yml pour les PR.
+#   - À ne lancer QUE sur des cibles dont vous êtes propriétaire. Le mode par
+#     défaut (app démarrée dans le runner) est sans risque pour l'extérieur.
+#
+# Agnostique du langage, mêmes inputs que owasp-zap-baseline.yml. Deux modes :
 #   1. App locale : l'app est installée / buildée / démarrée dans le runner via les
 #      commandes fournies (npm, php -S, docker compose, ...), puis ZAP scanne
 #      http://localhost:<port>.
 #   2. Cible distante : `target-url` est renseigné, les étapes install / build /
-#      start sont ignorées et ZAP scanne directement l'URL. À réserver aux cibles
-#      dont vous êtes propriétaire (environnement de staging, par exemple).
+#      start sont ignorées et ZAP scanne directement l'URL.
 #
 # Le rapport (HTML / JSON / Markdown) est publié en artifact GitHub Actions.
 #
-# Exemple — SPA Node :
+# Exemple — SPA Node, tous les lundis :
+#   on:
+#     schedule:
+#       - cron: '0 8 * * 1'
+#     workflow_dispatch:
 #   jobs:
-#     zap-baseline:
-#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.2.1
+#     zap-full-scan:
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-full-scan.yml@v1.2.1
 #       with:
 #         project-name: portfolio
 #         node-version: '22'
@@ -25,11 +34,13 @@ name: OWASP ZAP Baseline Scan
 #         build-command: npm run build
 #         start-command: npm run preview -- --port 4173 --host
 #         port: '4173'
+#         zap-ajax-spider: true
+#         zap-active-scan-minutes: '30'
 #
-# Exemple — backend conteneurisé (PHP, Go, Java, ...) avec API authentifiée :
+# Exemple — backend conteneurisé avec API authentifiée :
 #   jobs:
-#     zap-baseline:
-#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-baseline.yml@v1.2.1
+#     zap-full-scan:
+#       uses: Skuskusku13/workflows-reusable/.github/workflows/owasp-zap-full-scan.yml@v1.2.1
 #       with:
 #         project-name: mon-api
 #         start-command: docker compose -f .docker/docker-compose.yml up -d --build
@@ -61,7 +72,7 @@ on:
         required: false
         type: string
       install-command:
-        description: "Commande d'installation des dépendances. Vide + node-version renseigné = `npm ci --no-audit --no-fund` (compatibilité v1.2.0). Vide sinon = étape ignorée."
+        description: "Commande d'installation des dépendances. Vide + node-version renseigné = `npm ci --no-audit --no-fund`. Vide sinon = étape ignorée."
         default: ''
         required: false
         type: string
@@ -98,7 +109,7 @@ on:
 
       # --- Cible distante (remplace le démarrage local) ---
       target-url:
-        description: "URL complète à scanner à la place de l'app locale (ex : https://staging.example.com). Uniquement des cibles dont vous êtes propriétaire."
+        description: "URL complète à scanner à la place de l'app locale (ex : https://staging.example.com). Uniquement des cibles dont vous êtes propriétaire : ZAP envoie de vraies attaques."
         default: ''
         required: false
         type: string
@@ -106,7 +117,7 @@ on:
       # --- ZAP ---
       zap-spider-minutes:
         description: "Durée max du spider ZAP en minutes"
-        default: '1'
+        default: '5'
         required: false
         type: string
       zap-ajax-spider:
@@ -114,6 +125,11 @@ on:
         default: false
         required: false
         type: boolean
+      zap-active-scan-minutes:
+        description: "Durée max du scan actif en minutes (config ZAP scanner.maxScanDurationInMins). 0 = illimité, à éviter en CI."
+        default: '30'
+        required: false
+        type: string
       zap-fail-on-warn:
         description: "Si true, le job échoue aussi sur les alertes WARN (pas seulement FAIL)"
         default: false
@@ -130,8 +146,8 @@ on:
         required: false
         type: string
       job-timeout-minutes:
-        description: "Timeout global du job en minutes"
-        default: 20
+        description: "Timeout global du job en minutes. Doit couvrir démarrage de l'app + spider + scan actif."
+        default: 90
         required: false
         type: number
 
@@ -141,8 +157,8 @@ on:
         required: false
 
 jobs:
-  zap-baseline:
-    name: "OWASP ZAP baseline scan (${{ inputs.project-name }})"
+  zap-full-scan:
+    name: "OWASP ZAP full scan (${{ inputs.project-name }})"
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     permissions:
@@ -175,7 +191,7 @@ jobs:
         if: ${{ inputs.target-url == '' && inputs.install-command != '' }}
         run: ${{ inputs.install-command }}
 
-      # Compatibilité v1.2.0 : node-version renseigné sans install-command → npm ci.
+      # node-version renseigné sans install-command → npm ci (même règle que le baseline).
       - name: Install dependencies (npm ci par défaut)
         if: ${{ inputs.target-url == '' && inputs.install-command == '' && inputs.node-version != '' }}
         run: npm ci --no-audit --no-fund
@@ -226,17 +242,19 @@ jobs:
             echo "Scan non authentifié (aucun secret zap-auth-header-value fourni)."
           fi
 
-      # -m : durée max du spider | -j : spider navigateur | -I : ne pas échouer sur WARN
-      - name: ZAP baseline scan
-        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+      # -m : durée max du spider | -z : borne le scan actif | -j : spider navigateur
+      # -I : ne pas échouer sur WARN
+      - name: ZAP full scan
+        uses: zaproxy/action-full-scan@3c58388149901b9a03b7718852c5ba889646c27c # v0.13.0
         with:
           target: ${{ env.TARGET_URL }}
           rules_file_name: ${{ inputs.zap-rules-file }}
           fail_action: true
           allow_issue_writing: false
-          artifact_name: "${{ inputs.project-name }}-zap-baseline-report"
+          artifact_name: "${{ inputs.project-name }}-zap-full-scan-report"
           cmd_options: >-
             -m ${{ inputs.zap-spider-minutes }}
+            -z "-config scanner.maxScanDurationInMins=${{ inputs.zap-active-scan-minutes }}"
             ${{ inputs.zap-ajax-spider && '-j' || '' }}
             ${{ !inputs.zap-fail-on-warn && '-I' || '' }}
 
